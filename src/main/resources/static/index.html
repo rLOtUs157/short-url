@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>短链接服务</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px}
+  h1{font-size:22px}
+  input{width:100%;padding:10px;box-sizing:border-box;margin:8px 0;font-size:14px}
+  button{padding:10px 20px;cursor:pointer;font-size:14px;margin-right:8px}
+  .result{margin-top:16px;font-size:14px;line-height:1.8}
+  .box{border:1px solid #ddd;border-radius:8px;padding:20px;margin-top:16px}
+  .tip{color:#888;font-size:12px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<h1>短链接生成器</h1>
+
+<!-- 登录 / 注册 -->
+<div class="box" id="authBox">
+  <input id="username" placeholder="用户名" autocomplete="username">
+  <input id="password" type="password" placeholder="密码" autocomplete="current-password">
+  <button onclick="login()">登录</button>
+  <button onclick="register()">注册</button>
+  <div class="tip">还没有账号？点"注册"先注册，再登录</div>
+  <div class="result" id="authMsg"></div>
+</div>
+
+<!-- 已登录：生成短链 -->
+<div class="box hidden" id="genBox">
+  <div>已登录：<b id="who"></b> <button onclick="logout()" style="font-size:12px">退出</button></div>
+  <input id="url" type="url" placeholder="粘贴长链接，如 https://www.example.com/...">
+  <button onclick="create()">生成短链接</button>
+  <div class="result" id="result"></div>
+  <hr style="margin-top:16px">
+  <h3 style="margin:8px 0">我的短链</h3>
+  <div id="myList"></div>
+</div>
+
+<script>
+const TOKEN_KEY = 'short_token';
+
+function saveToken(t){ localStorage.setItem(TOKEN_KEY, t); }
+function getToken(){ return localStorage.getItem(TOKEN_KEY); }
+
+function refreshUI(){
+  const t = getToken();
+  document.getElementById('authBox').classList.toggle('hidden', !!t);
+  document.getElementById('genBox').classList.toggle('hidden', !t);
+  if(t){
+    // token 里没有用户名，简单从 localStorage 存一下
+    document.getElementById('who').textContent = localStorage.getItem('short_user') || '已登录';
+    loadMyUrls();
+  }
+}
+
+async function register(){
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const msg = document.getElementById('authMsg');
+  if(!username || !password){ msg.textContent='请输入用户名和密码'; return; }
+  const r = await fetch('/api/auth/register', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ username, password })
+  });
+  const data = await r.json();
+  msg.textContent = data.code === 0 ? '注册成功，去登录' : '失败：' + data.msg;
+}
+
+async function login(){
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const msg = document.getElementById('authMsg');
+  if(!username || !password){ msg.textContent='请输入用户名和密码'; return; }
+  const r = await fetch('/api/auth/login', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ username, password })
+  });
+  const data = await r.json();
+  if(data.code === 0){
+    saveToken(data.token);
+    localStorage.setItem('short_user', username);
+    refreshUI();
+  } else {
+    msg.textContent = '失败：' + data.msg;
+  }
+}
+
+// 退出登录：通知服务端把这个 token 加入黑名单。
+// 只有服务端确认成功才清本地登录态 —— 否则用户以为退出了，
+// token 其实还有效，反而更危险。失败时保留 token 并提示重试。
+async function logout(){
+  const t = getToken();
+  if(t){
+    let serverOk = false;
+    try{
+      const r = await fetch('/api/auth/logout', {
+        method:'POST',
+        headers:{ 'Authorization': 'Bearer ' + t }
+      });
+      // 401 = token 本来就已经无效，等价于已登出
+      serverOk = r.ok || r.status === 401;
+    }catch(e){
+      console.warn('通知服务端登出失败', e);
+    }
+    if(!serverOk){
+      alert('登出失败：服务端没能使该 token 失效，请检查网络后重试。');
+      refreshUI();          // 保持登录态，用户可重试
+      return;
+    }
+  }
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem('short_user');
+  refreshUI();
+}
+
+// 加载"我的短链"列表
+async function loadMyUrls(){
+  const t = getToken();
+  if(!t) return;
+  const box = document.getElementById('myList');
+  box.innerHTML = '加载中...';
+  const r = await fetch('/api/my-urls', { headers:{ 'Authorization': 'Bearer ' + t } });
+  if(r.status === 401){ box.innerHTML=''; return; }
+  const data = await r.json();
+  const items = data.data || [];
+  if(items.length === 0){ box.innerHTML='<span class="tip">还没有生成过短链</span>'; return; }
+  box.innerHTML = items.map(i =>
+    '<div style="padding:6px 0;border-bottom:1px solid #eee">' +
+      '<a href="'+i.shortUrl+'" target="_blank">'+i.shortUrl+'</a>' +
+      ' <button onclick="copyLink(\''+i.shortUrl+'\')" style="font-size:12px">复制</button>' +
+      '<div class="tip">目标：'+escapeHtml(i.longUrl)+' ｜ 点击：'+i.clickCount+' ｜ 创建：'+i.createdAt+'</div>' +
+    '</div>'
+  ).join('');
+}
+function copyLink(url){
+  navigator.clipboard.writeText(url);
+  alert('已复制：'+url);
+}
+function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function create(){
+  const longUrl = document.getElementById('url').value.trim();
+  const res = document.getElementById('result');
+  if(!longUrl){ res.textContent = '请输入链接'; return; }
+  const r = await fetch('/api/short-url', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + getToken()
+    },
+    body: JSON.stringify({ longUrl })
+  });
+  if(r.status === 401){
+    res.textContent = '登录已过期，请重新登录';
+    logout();
+    return;
+  }
+  const data = await r.json();
+  if(data.code === 0){
+    res.innerHTML = '短链接：<a href="' + data.shortUrl + '" target="_blank">' + data.shortUrl + '</a>';
+    loadMyUrls();
+  } else {
+    res.textContent = '失败：' + data.msg;
+  }
+}
+
+refreshUI();
+</script>
+</body>
+</html>
